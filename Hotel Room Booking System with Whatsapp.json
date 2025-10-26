@@ -1,0 +1,413 @@
+{
+  "name": "Hotel Room Booking System with Whatsapp",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "messages"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.whatsAppTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        32
+      ],
+      "id": "2f47b847-acd2-4f81-9784-632de3258fd2",
+      "name": "WhatsApp Trigger",
+      "webhookId": "d317044b-5ed4-4101-9dd0-be0dee293a2f",
+      "credentials": {
+        "whatsAppTriggerApi": {
+          "id": "NMU2pzCGk1pn7Ya0",
+          "name": "WhatsApp OAuth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.messages }}",
+        "options": {
+          "systemMessage": "\"You are a booking assistant for Grand Hotel Murree. Extract the check-in date, check-out date, and desired room type from the user's message. If any information is missing, politely ask for it. The hotel offers 'Standard Double,' 'Deluxe King,' and 'Family Suite' rooms.\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        224,
+        32
+      ],
+      "id": "250c08d4-23ed-498f-af4e-6838486efa9a",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        176,
+        240
+      ],
+      "id": "1ad676db-3451-496c-a935-a89ed4c8119c",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "Fc3f0XgqFU9X1JSP",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.messages }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        336,
+        240
+      ],
+      "id": "ea677309-50da-498e-8ba1-42cb01cc05ae",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "jsCode": "// This script processes the Google Sheets data to check hotel room availability.\n\n// Get the customer's booking request details from the \"Set\" node.\nconst requestedRoomType = $('Set').item.json.requested_room_type;\nconst checkInDate = new Date($('Set').item.json.check_in_date);\nconst checkOutDate = new Date($('Set').item.json.check_out_date);\n\n// Use the $node['Node Name'].item.json.data syntax for robust access.\n// This works best when the Google Sheets nodes are executed before this node.\nconst inventoryData = $('Google Sheets (Inventory)').item.json.data;\nconst allBookings = $('Google Sheets (Bookings)').item.json.data;\n\nlet totalRooms = 0;\n// Find the total number of rooms for the requested type from the inventory data.\nif (Array.isArray(inventoryData)) {\n  for (const room of inventoryData) {\n    if (room['Room Type'] === requestedRoomType) {\n      totalRooms = parseInt(room['Total Rooms']);\n      break;\n    }\n  }\n}\n\n// Check if a valid number of rooms was found.\nif (isNaN(totalRooms) || totalRooms <= 0) {\n  return [{ json: { isAvailable: false, error: 'Room type not found or inventory data is invalid.' } }];\n}\n\nlet bookedCount = 0;\n// Loop through all existing bookings to count overlapping reservations for the requested room type.\nif (Array.isArray(allBookings)) {\n  for (const booking of allBookings) {\n    const bookingRoomType = booking['Room Type'];\n    const bookingCheckIn = new Date(booking['Check-in Date']);\n    const bookingCheckOut = new Date(booking['Check-out Date']);\n\n    // Check for bookings of the same room type that overlap with the requested dates.\n    if (bookingRoomType === requestedRoomType) {\n      if ((checkInDate < bookingCheckOut) && (checkOutDate > bookingCheckIn)) {\n        bookedCount++;\n      }\n    }\n  }\n}\n\n// Calculate the number of available rooms.\nconst availableRooms = totalRooms - bookedCount;\nconst isAvailable = availableRooms > 0;\n\n// Return the result as a new item in the workflow.\nreturn [{ json: { isAvailable: isAvailable, availableRooms: availableRooms } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        32
+      ],
+      "id": "c2729351-4cc3-4af7-8733-0005ce2be511",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d09ebedb-7cf0-4c38-a0e5-9bc160bbb687",
+              "name": "requestedRoomType",
+              "value": "={{ $json.output }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        576,
+        32
+      ],
+      "id": "4ce847ab-fccd-443e-b38e-b517562bbbef",
+      "name": "Set"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4",
+          "mode": "list",
+          "cachedResultName": "Hotel Rooms Booking",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1983158874,
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4/edit#gid=1983158874"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        800,
+        128
+      ],
+      "id": "81b33f57-0d0e-43f2-a39d-46b8dea4d305",
+      "name": "Google Sheets (Bookings)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2Nge5t99Q34rgxdo",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4",
+          "mode": "list",
+          "cachedResultName": "Hotel Rooms Booking",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Inventory",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1MC7DFIPbgsbipDeeyGDJsgiOheZBFAbS5Dkll2qIgV4/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        800,
+        -64
+      ],
+      "id": "49ca430f-8cd2-4249-a637-58a9ae747328",
+      "name": "Google Sheets (Inventory)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2Nge5t99Q34rgxdo",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1024,
+        32
+      ],
+      "id": "eb335847-1ad8-4099-a7bf-63bad621067f",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a7bd036e-9047-4e1c-bc49-44cbe9d6cb74",
+              "leftValue": "={{ $json.isAvailable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1472,
+        32
+      ],
+      "id": "5347194d-a785-4ba8-a327-1c6761cba5ad",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "=+15551832891",
+        "recipientPhoneNumber": "+923007696869",
+        "textBody": "=\"Great news! We have standard double available from 26th October, 2025 to 27th October, 2025. Would you like to proceed with the booking?",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        1696,
+        -64
+      ],
+      "id": "653a5a8f-30b8-435e-b6e4-7362b9e17377",
+      "name": "Send message",
+      "webhookId": "1478b879-75f7-45c1-969c-b4c1a1ad1a2d",
+      "credentials": {
+        "whatsAppApi": {
+          "id": "zqKKRu72chQXuo29",
+          "name": "WhatsApp account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "735589636315286",
+        "recipientPhoneNumber": "+923007696869",
+        "textBody": "= \"Unfortunately, the room type is not available for those dates. Would you like to check other dates or room types?\"",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1,
+      "position": [
+        1696,
+        128
+      ],
+      "id": "a455a4cd-a42f-4af7-a5b4-a4d68d6dbdb3",
+      "name": "Send message1",
+      "webhookId": "669ce8fb-0167-42e3-81bd-79b0f2d3b7d2",
+      "credentials": {
+        "whatsAppApi": {
+          "id": "zqKKRu72chQXuo29",
+          "name": "WhatsApp account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "WhatsApp Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets (Bookings)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Sheets (Inventory)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets (Bookings)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Google Sheets (Inventory)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Send message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "2464ac0d-28f5-448b-bd03-96b2f3326e2a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "75c1a99ca732a06f925dbe2e1db0243bb49bca2f1ef1aec5a2d8e7f2e488d623"
+  },
+  "id": "OUQ44Y3RbOqn9945",
+  "tags": []
+}
