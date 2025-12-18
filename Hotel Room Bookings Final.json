@@ -1,0 +1,3318 @@
+{
+  "name": "Hotel Room Bookings Final",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Normalize Message (Telegram) — minimal, Airtable-compatible\n// Output:\n//   phone   -> Telegram chat.id as string (used everywhere as phone_key_text)\n//   text    -> user message (/start becomes hi)\n//   payload -> raw Telegram trigger JSON (kept for debugging)\n\nconst input = $input.first().json;\n\n// Telegram trigger payloads can vary slightly\nconst msg =\n  input.message ??\n  input.edited_message ??\n  input.channel_post ??\n  {};\n\n// ✅ Telegram stable conversation ID\nconst chatId = msg?.chat?.id;\n\n// ✅ Raw text (may be empty for non-text messages)\nconst rawText = (msg?.text ?? \"\").toString().trim();\n\n// ✅ Treat /start as \"hi\"\nconst text = rawText === \"/start\" ? \"hi\" : rawText;\n\n// ✅ CRITICAL: unify identifier\n// We intentionally reuse the existing `phone` field\n// so ALL existing Airtable + workflow logic keeps working\nconst phone =\n  chatId !== undefined && chatId !== null\n    ? String(chatId)\n    : \"\";\n\n// Optional: sender id (not required downstream)\nconst user_id =\n  msg?.from?.id !== undefined && msg?.from?.id !== null\n    ? String(msg.from.id)\n    : null;\n\nreturn [{\n  json: {\n    phone,        // <-- used as phone_key_text everywhere\n    text,         // <-- used by AI Agent\n    user_id,      // optional (safe to keep)\n    payload: input\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        480
+      ],
+      "id": "d25e8af5-7870-44e4-bb0c-bffe04bc5488",
+      "name": "Normalize Message"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $node[\"Map Room Choice (Code)\"].json.text_mapped || $node[\"Normalize Message\"].json.text }}",
+        "options": {
+          "systemMessage": "=You are a hotel booking assistant for a WhatsApp-based system.\n\nYou MUST ALWAYS respond with ONLY valid JSON, with this exact structure:\n\n{\n  \"intent\": \"book_room | check_booking_status | pricing_info | cancel_booking | help | unknown\",\n  \"step\": \"welcome | ask_room_type | ask_check_in | ask_check_out | ask_rooms | confirm_booking | booking_confirmed\",\n  \"data\": {\n    \"room_type\": \"string or null\",\n    \"check_in\": \"YYYY-MM-DD or null\",\n    \"check_out\": \"YYYY-MM-DD or null\",\n    \"rooms\": \"number or null\",\n    \"confirm\": \"yes | no | null\"\n  },\n  \"response\": \"WhatsApp message to the user\"\n}\n\nRules for formatting:\n- NEVER return anything outside the JSON object.\n- NO markdown, NO backticks, NO explanations.\n- Do NOT escape the JSON with extra quotes. It must be a direct JSON object.\n- \"intent\", \"step\", \"data\", and \"response\" MUST always exist.\n\n========================================\nINTENTS (used by the workflow)\n========================================\n\nYou have 6 possible intents:\n\n1) \"book_room\"\n2) \"check_booking_status\"\n3) \"pricing_info\"\n4) \"cancel_booking\"\n5) \"help\"\n6) \"unknown\"\n\nBACKEND ACTIONS (via the Switch node) are only triggered for these 4 intents:\n- \"book_room\"\n- \"check_booking_status\"\n- \"pricing_info\"\n- \"cancel_booking\"\n\nThe \"help\" and \"unknown\" intents are used ONLY to send guidance or menu messages.\nThey do NOT trigger backend actions, but their \"response\" is still sent to the user.\n\n========================================\nWHATSAPP MENU BEHAVIOUR\n========================================\n\nIf the user sends a greeting such as:\n- \"hi\"\n- \"hello\"\n- \"salam\"\n- \"assalamualaikum\"\n- \"menu\"\n- \"help\"\n\nThen:\n- Set \"intent\": \"help\"\n- Set \"step\": \"welcome\"\n- Set \"data\" fields to null (room_type, check_in, check_out, rooms, confirm)\n- In \"response\", send this exact WhatsApp menu (you can change [Your Hotel Name]):\n\n\"👋 Welcome to [Grand Hotel]!\n\nHow can I assist you today?\n\n1️⃣ Book a Room  \n2️⃣ Check Booking Status  \n3️⃣ Pricing Information  \n4️⃣ Cancel a Booking  \n\nYou can reply with the number (1–4) or type what you want, like 'book a room'.\"\n\nDo NOT use \"unknown\" for simple greetings. Use \"help\" and show the menu.\n\nIf the user replies with just a number:\n- \"1\" → intent = \"book_room\"\n- \"2\" → intent = \"check_booking_status\"\n- \"3\" → intent = \"pricing_info\"\n- \"4\" → intent = \"cancel_booking\"\n\nIn these cases, set \"step\" based on what is logically needed next.\n\n========================================\nBOOKING FLOW LOGIC (book_room)\n========================================\n\nFor \"book_room\" intent, follow this step-by-step flow using \"step\" and \"data\":\n\nDATA FIELDS:\n- data.room_type: e.g. \"Deluxe\", \"Suite\"\n- data.check_in: date in \"YYYY-MM-DD\"\n- data.check_out: date in \"YYYY-MM-DD\"\n- data.rooms: number of rooms (integer)\n- data.confirm: \"yes\", \"no\", or null\n\nSTEPS:\n\n1) When the user wants to book a room but the room_type is not yet known:\n\n- Set \"step\": \"ask_room_type\"\n- Set \"intent\": \"book_room\"\n- Do NOT invent or list specific room names.\n- In \"response\", ask generically, for example:\n  \"Which room type would you like to book? Please choose one of the available room types shown in the next message.\"\n\nNEVER write specific example names like Standard, Deluxe, Suite yourself.\nThe actual list of room types will be sent separately from the Airtable Inventory table.\n\n2) Once room_type is known but check_in is missing:\n   - step = \"ask_check_in\"\n   - Ask: “What is your check-in date? Please reply in YYYY-MM-DD format (example: 2025-12-25).”\n   - Interpret user-friendly dates and convert to YYYY-MM-DD in data.check_in.\n\n3) Once check_in is known but check_out is missing:\n   - step = \"ask_check_out\"\n   - Ask: “What is your check-out date? Please reply in YYYY-MM-DD format (example: 2025-12-27).”\n   - Convert to YYYY-MM-DD in data.check_out.\n\n4) Once both dates are known but rooms is missing:\n   - step = \"ask_rooms\"\n   - Ask: \"How many rooms would you like to book?\"\n   - Store numeric value in data.rooms.\nWhen step is ask_rooms, treat user input as a room count number only. Do not interpret 1–4 as menu options.\nIf step is ask_rooms, and the user message contains a number (e.g., “2”), set:\ndata.rooms to that number and advance step to booking_confirmed.\n\n5) When room_type, check_in, check_out, and rooms are all available:\n   - step = \"confirm_booking\"\n   - Summarize all details in \"response\" and ask the user to confirm.\n   - Example response:\n     \"You want to book 2 Deluxe room(s) from 2025-01-10 to 2025-01-12. Please reply 'yes' to confirm or 'no' to change details.\"\n   - If the user clearly accepts, set data.confirm = \"yes\".\n   - If the user clearly rejects or wants to change, set data.confirm = \"no\" and adjust the step to ask what they want to change.\n\n6) When the booking is confirmed:\n   - intent = \"book_room\"\n   - step = \"booking_confirmed\"\n   - data.confirm = \"yes\"\n   - All data fields must be filled (room_type, check_in, check_out, rooms).\n   - In \"response\", you may say something like:\n     \"Great! I am confirming your booking and calculating the total price now.\"\n\nIMPORTANT:\n- The workflow will only create/save the booking when:\n  intent = \"book_room\"\n  AND step = \"booking_confirmed\"\n  AND data.confirm = \"yes\"\n- For all earlier steps, the workflow just sends \"response\" to the user and waits for the next message.\n\n========================================\nOTHER INTENTS\n========================================\n\ncheck_booking_status:\n- Use when the user wants to know their existing booking details.\n- Keep step simple (e.g. \"welcome\") unless context requires more.\n- In \"response\", ask for any needed identifier (if the phone number alone is not enough) in the following way:\n“Please send your Booking ID (example: recXXXX…).”\n\npricing_info:\nIf the user asks for pricing information, do not mention specific room types or prices yourself.\nThe exact list of room types and prices will be provided by the inventory query.\n\ncancel_booking:\n- Use when the user wants to cancel a booking.\n- \"response\" should confirm they really want to cancel and maybe restate what will be cancelled if known.\n\nhelp:\n- Use for greetings and vague questions.\n- Always show the main WhatsApp menu in \"response\".\n\nunknown:\n- Use only if the user message truly cannot be understood.\n- \"response\" should politely ask them to try again or show a brief example of phrases like:\n  \"book a room\", \"check my booking status\", \"pricing\", or \"cancel my booking\".\n\n========================================\nGENERAL BEHAVIOUR\n========================================\n\n- Always respect the data already collected; do not ask again unless the user wants to change something.\n- Use short, friendly, professional sentences in \"response\".\n- Never mention JSON or internal fields in \"response\".\n- Only the content of \"response\" is shown to the user in WhatsApp.\n\nNote: If the user selects “Book a Room” from the menu, do not assume or reuse any previous room_type. Always ask the user to choose a room type first."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        976,
+        480
+      ],
+      "id": "7462ee6f-39d4-451b-ad9d-1a40620feeba",
+      "name": "AI Agent (Process Queries)",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{\n  $node[\"Parse AI Output\"].json.intent === 'book_room'\n    ? 0\n    : $node[\"Parse AI Output\"].json.intent === 'check_booking_status'\n    ? 1\n    : $node[\"Parse AI Output\"].json.intent === 'pricing_info'\n    ? 2\n    : $node[\"Parse AI Output\"].json.intent === 'cancel_booking'\n    ? 3\n    : 0\n}}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1616,
+        464
+      ],
+      "id": "bad1f3f6-b6f6-4002-8233-340de4380853",
+      "name": "Switch",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "contextWindowLength": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        1120,
+        704
+      ],
+      "id": "4baf616f-4839-4c80-b693-6e6c403052df",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "jsCode": "// -----------------------------\n// INPUT SOURCES\n// -----------------------------\n\n// Inventory record (from Get Price From Inventory)\nconst inventoryItem = $items(\"Get Price From Inventory\")[0]?.json || {};\n\n// AI / Session data (from Parse AI Output)\nconst aiData = $node[\"Parse AI Output\"].json.data || {};\n\n// -----------------------------\n// REQUIRED FIELDS\n// -----------------------------\n\nconst basePrice = Number(inventoryItem.base_price || 0);\nconst weekendSurcharge = Number(inventoryItem.weekend_surcharge || 0);\nconst currency = inventoryItem.currency || \"USD\";\n\nconst roomType = aiData.room_type;\nconst rooms = Number(aiData.rooms || 1);\n\nconst checkInStr = aiData.check_in;\nconst checkOutStr = aiData.check_out;\n\n// -----------------------------\n// DATE CALCULATIONS\n// -----------------------------\n\nconst checkInDate = new Date(checkInStr);\nconst checkOutDate = new Date(checkOutStr);\n\n// Number of nights\nconst msPerDay = 1000 * 60 * 60 * 24;\nconst nights = Math.max(\n  1,\n  Math.round((checkOutDate - checkInDate) / msPerDay)\n);\n\n// -----------------------------\n// PRICE CALCULATION\n// -----------------------------\n\nlet totalPrice = 0;\n\n// Loop through each night to apply weekend surcharge\nfor (let i = 0; i < nights; i++) {\n  const nightDate = new Date(checkInDate);\n  nightDate.setDate(checkInDate.getDate() + i);\n\n  const day = nightDate.getDay(); // 0=Sun, 6=Sat\n  const isWeekend = day === 0 || day === 6;\n\n  const nightlyPrice = basePrice + (isWeekend ? weekendSurcharge : 0);\n  totalPrice += nightlyPrice;\n}\n\n// Multiply by number of rooms\ntotalPrice = totalPrice * rooms;\n\n// -----------------------------\n// OUTPUT\n// -----------------------------\n\nreturn [\n  {\n    json: {\n      room_type: roomType,\n      check_in: checkInStr,\n      check_out: checkOutStr,\n      rooms,\n      nights,\n      base_price: basePrice,\n      weekend_surcharge: weekendSurcharge,\n      total_price: totalPrice,\n      currency,\n      price_breakdown: `${rooms} × ${nights} night(s) (${roomType}) = ${totalPrice} ${currency}`\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2352,
+        -80
+      ],
+      "id": "d9fe8c6b-9ef1-4088-8168-6b386424834d",
+      "name": "Calculate Price"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmYInv5gc9FlmOH",
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmYInv5gc9FlmOH"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{$node[\"Normalize Message\"].json.phone}}",
+            "room_type": "={{ $node[\"Parse AI Output\"].json.data.room_type }}",
+            "check_in": "={{ $node[\"Parse AI Output\"].json.data.check_in }}",
+            "check_out": "={{ $node[\"Parse AI Output\"].json.data.check_out }}",
+            "rooms_booked": "={{ $node[\"Parse AI Output\"].json.data.rooms }}",
+            "nights": "={{$node[\"Calculate Price\"].json.nights}}",
+            "currency": "={{$node[\"Calculate Price\"].json.currency}}",
+            "total_price": "={{$node[\"Calculate Price\"].json.total_price}}",
+            "status": "=confirmed",
+            "phone_key_text": "={{ $node[\"Normalize Message\"].json.phone }}",
+            "session_record_id": "={{ $node[\"Get Session (Airtable)\"].json.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "booking_id",
+              "displayName": "booking_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session_record_id",
+              "displayName": "session_record_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "nights",
+              "displayName": "nights",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "rooms_booked",
+              "displayName": "rooms_booked",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "total_price",
+              "displayName": "total_price",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "hold_expires_at",
+              "displayName": "hold_expires_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2576,
+        -80
+      ],
+      "id": "4d6b93ae-77ab-4c03-996a-cc7bdad5e2e0",
+      "name": "Update Booking in Airtable",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Switch Output 0 → book_room branch\n\n\n## Switch Output 1 → Get Booking Status branch\n\n## Switch Output 2 → Pricing Info branch\n\n## Switch Output 3 → Cancel Booking branch\n",
+        "height": 656,
+        "width": 304
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1456,
+        16
+      ],
+      "typeVersion": 1,
+      "id": "3a8d0dcb-8856-4415-9f21-8a5ead7072fe",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmYInv5gc9FlmOH",
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmYInv5gc9FlmOH"
+        },
+        "filterByFormula": "=OR(\n  {booking_id} = '{{$node[\"Parse AI Output\"].json.data.booking_id}}',\n  {phone_key_text} = '{{$node[\"Normalize Message\"].json.phone}}'\n)",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2096,
+        320
+      ],
+      "id": "a787fb93-709a-44a1-89bc-fd3ae5d42c01",
+      "name": "Get Booking Status",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblq3kVleaODTeW5r",
+          "mode": "list",
+          "cachedResultName": "Inventory",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblq3kVleaODTeW5r"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1888,
+        592
+      ],
+      "id": "ac9a9376-8e69-4d8d-b9d7-3f88e648f9b9",
+      "name": "Get Pricing From Inventory",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmYInv5gc9FlmOH",
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmYInv5gc9FlmOH"
+        },
+        "filterByFormula": "=({booking_id} = '{{ $node[\"Parse AI Output\"].json.data.booking_id }}')",
+        "returnAll": false,
+        "limit": 1,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2064,
+        752
+      ],
+      "id": "383c1db4-d536-45de-8366-231ea16ecb3b",
+      "name": "Find Booking To Cancel",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmYInv5gc9FlmOH",
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmYInv5gc9FlmOH"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "\"cancelled\"",
+            "booking_id": "={{ $node[\"Find Booking To Cancel\"].json.id }}"
+          },
+          "matchingColumns": [
+            "booking_id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "booking_id",
+              "displayName": "booking_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session_record_id",
+              "displayName": "session_record_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "nights",
+              "displayName": "nights",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "rooms_booked",
+              "displayName": "rooms_booked",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "total_price",
+              "displayName": "total_price",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2528,
+        736
+      ],
+      "id": "52fedb73-c408-4618-b51a-124e4760fa6c",
+      "name": "Cancel Booking Record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function tryParseJSON(str) {\n  try {\n    return JSON.parse(str);\n  } catch {\n    return null;\n  }\n}\n\nconst input = $json || {};\n\nlet raw =\n  input.output ??\n  input.text ??\n  input.response ??\n  input.content ??\n  input.message ??\n  null;\n\nif (raw == null) raw = input;\n\nlet obj = null;\n\nif (typeof raw === \"object\") {\n  obj = raw;\n} else if (typeof raw === \"string\") {\n  const trimmed = raw.trim();\n  obj = tryParseJSON(trimmed);\n  if (!obj) {\n    const match = trimmed.match(/\\{[\\s\\S]*\\}/);\n    if (match) obj = tryParseJSON(match[0]);\n  }\n}\n\nif (!obj || typeof obj !== \"object\") {\n  obj = {\n    intent: \"unknown\",\n    step: \"welcome\",\n    data: {},\n    response: \"\",\n  };\n}\n\nconst intent = obj.intent ?? \"unknown\";\nconst step = obj.step ?? \"welcome\";\n\nconst data = {\n  room_type: obj.data?.room_type ?? null,\n  check_in: obj.data?.check_in ?? null,\n  check_out: obj.data?.check_out ?? null,\n  rooms: obj.data?.rooms ?? null,\n  confirm: obj.data?.confirm ?? null,\n  booking_id: obj.data?.booking_id ?? null,\n};\n\n// --- Hard mute AI response when Telegram nodes should handle messaging ---\nconst TELEGRAM_OWNED_INTENTS = new Set([\"check_booking_status\",\"pricing_info\",\"cancel_booking\"]);\nconst TELEGRAM_OWNED_BOOK_ROOM_STEPS = new Set([\"ask_room_type\",\"show_room_types\",\"booking_confirmed\",\"show_pricing\"]);\n\nif (TELEGRAM_OWNED_INTENTS.has(intent) || (intent === \"book_room\" && TELEGRAM_OWNED_BOOK_ROOM_STEPS.has(step))) {\n  obj.response = \"\";\n}\n\n// 🔐 HARD booking_id fallback from Telegram\ntry {\n  const userText = ($node[\"Normalize Message\"]?.json?.text ?? \"\").trim();\n  if (!data.booking_id && /^rec[a-zA-Z0-9]{10,}$/.test(userText)) {\n    data.booking_id = userText;\n  }\n} catch {}\n\n// 🚫 Kill AI messages for terminal steps\nconst terminalSteps = [\n  \"booking_confirmed\",\n  \"show_pricing\",\n  \"show_booking_status\",\n  \"cancel_confirmed\",\n  \"cancel_done\",\n];\n\nlet response = terminalSteps.includes(step)\n  ? \"\"\n  : (obj.response ?? \"\").toString();\n\nreturn [\n  {\n    json: {\n      intent,\n      step,\n      data,\n      response,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        480
+      ],
+      "id": "d6c2e328-4e08-41cc-adc5-7ab12fd99920",
+      "name": "Parse AI Output",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblq3kVleaODTeW5r",
+          "mode": "list",
+          "cachedResultName": "Inventory",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblq3kVleaODTeW5r"
+        },
+        "filterByFormula": "={room_type} = '{{ $node[\"Parse AI Output\"].json.data.room_type }}'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2128,
+        -80
+      ],
+      "id": "512a955b-cd2f-4274-b77d-1fca11462f16",
+      "name": "Get Price From Inventory",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\n\n// We are using the parsed AI output here\nconst intent = item.intent;\nconst step = item.step;\n\nif (intent === 'book_room' && step === 'ask_room_type') {\n  // Pass this through to the next node\n  return [{ json: item }];\n}\n\n// For other steps, do nothing in this branch\nreturn [];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        -272
+      ],
+      "id": "d287b170-13fd-4d93-8597-61e54a8bba5a",
+      "name": "Check Step = ask_room_type"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblq3kVleaODTeW5r",
+          "mode": "list",
+          "cachedResultName": "Inventory",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblq3kVleaODTeW5r"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2128,
+        -272
+      ],
+      "id": "498751f6-5d94-48a5-baa3-7dc00ffbb515",
+      "name": "Get Available Room Types",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        752,
+        480
+      ],
+      "id": "2f1caa66-bee3-46f9-912d-62d97418a504",
+      "name": "Wait",
+      "webhookId": "349ad0f9-ba4a-4c40-8976-fa4e2cd310e4"
+    },
+    {
+      "parameters": {
+        "model": "qwen/qwen3-32b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        912,
+        704
+      ],
+      "id": "436af9e7-439a-47c2-bf62-18799a6c5cb9",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "J0mLDow1PZMNuY5V",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $items(); // Airtable results from \"Get Available Room Types\"\n\n// Build list from Airtable results\nconst rooms = items\n  .map(i => i.json?.room_type)\n  .filter(Boolean);\n\n// Fallback if no rooms\nif (rooms.length === 0) {\n  return [{\n    json: {\n      message: \"Sorry, we don’t have any rooms available right now.\",\n      room_options: []\n    }\n  }];\n}\n\n// Build ONE WhatsApp message\nlet message = \"We currently have the following room types available:\\n\";\nrooms.forEach((r, idx) => {\n  message += `${idx + 1}️⃣ ${r}\\n`;\n});\nmessage += \"\\nPlease reply with the name or number of the room type you’d like to book.\";\n\nreturn [{\n  json: {\n    message,\n    room_options: rooms\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        -272
+      ],
+      "id": "64ea1d80-7478-4d52-8be4-582a8a0abffa",
+      "name": "Build Room Type Options (One Message)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "970e045c-0cc8-4667-b1b2-0b96f84102d3",
+              "leftValue": "={{ $json.shouldSend === true }}",
+              "rightValue": "book_room",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2064,
+        1104
+      ],
+      "id": "1c96dcd8-c056-441d-95d8-90e153ec7377",
+      "name": "IF – Should Send AI Response"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "filterByFormula": "={phone_key_text} = '{{$node[\"Normalize Message\"].json.phone}}'",
+        "returnAll": false,
+        "limit": 1,
+        "options": {},
+        "sort": {
+          "property": [
+            {
+              "field": "updated_at",
+              "direction": "desc"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        304,
+        480
+      ],
+      "id": "1b575f64-5ec9-4871-b8fc-9a5ec3f991b5",
+      "name": "Get Session (Airtable)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================\n// Map Room Choice (Minimal + Correct)\n// Key fix: when selecting room type,\n// overwrite `text` so AI Agent doesn't\n// misread \"1\" as main-menu \"Book a Room\".\n// =====================================\n\nfunction safeItems(nodeName) {\n  try {\n    return $items(nodeName) || [];\n  } catch (e) {\n    return [];\n  }\n}\n\nconst inputItems = $input.all();\n\nreturn inputItems.map((item) => {\n  const incoming = item.json || {};\n\n  // Read user text\n  const textRaw = (incoming.text ?? incoming.text_raw ?? \"\").toString().trim();\n  const textLower = textRaw.toLowerCase();\n\n  // Get step from any place it may exist\n  const sessionFromJson = incoming.session || {};\n  const sessItems = safeItems(\"Get Session (Airtable)\");\n  const sess = sessItems[0]?.json || {};\n\n  const step =\n    (incoming.step ?? \"\").toString() ||\n    (sessionFromJson.step ?? \"\").toString() ||\n    (sess.step ?? \"\").toString();\n\n  // Only do mapping in room-type selection step\n  const ROOM_TYPE_STEPS = new Set([\"ask_room_type\", \"await_room_type\"]);\n  const isRoomTypeStep = ROOM_TYPE_STEPS.has(step);\n\n  if (!isRoomTypeStep) {\n    return { json: incoming };\n  }\n\n  // Read room options from common places\n  let options =\n    incoming.room_options_json ??\n    sessionFromJson.room_options_json ??\n    sess.room_options_json ??\n    null;\n\n  // Parse JSON string if needed\n  if (typeof options === \"string\") {\n    try {\n      options = JSON.parse(options);\n    } catch (e) {\n      options = null;\n    }\n  }\n\n  // Fallback: Carry Room Options node (if available on this run)\n  if (!Array.isArray(options) || options.length === 0) {\n    const carry = safeItems(\"Carry Room Options (Set)\");\n    const maybe = carry[0]?.json?.room_options_json ?? null;\n\n    if (Array.isArray(maybe)) options = maybe;\n    else if (typeof maybe === \"string\") {\n      try {\n        const parsed = JSON.parse(maybe);\n        if (Array.isArray(parsed)) options = parsed;\n      } catch (e) {}\n    }\n  }\n\n  if (!Array.isArray(options) || options.length === 0) {\n    // No options loaded; let AI handle it\n    return { json: incoming };\n  }\n\n  // Map numeric or text choice\n  let selectedRoom = null;\n\n  if (/^\\d+$/.test(textLower)) {\n    const idx = parseInt(textLower, 10) - 1;\n    if (options[idx]) selectedRoom = String(options[idx]);\n  } else {\n    selectedRoom =\n      options.find((opt) =>\n        String(opt).toLowerCase().includes(textLower)\n      ) ?? null;\n    if (selectedRoom) selectedRoom = String(selectedRoom);\n  }\n\n  if (!selectedRoom) {\n    // Invalid selection; let AI handle it\n    return { json: incoming };\n  }\n\n  // ✅ THE IMPORTANT PART:\n  // overwrite text so AI Agent sees \"Deluxe Room\" instead of \"1\"\n  return {\n    json: {\n      ...incoming,\n      text: selectedRoom,\n      text_raw: selectedRoom,\n      text_mapped: selectedRoom,\n\n      // also store in data so downstream Airtable payload can use it\n      data: {\n        ...(incoming.data || {}),\n        room_type: selectedRoom,\n      },\n\n      // keep step as-is (do NOT force step change here to avoid side effects)\n      mapped_room_choice: true,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        480
+      ],
+      "id": "e8bdd55e-d199-4736-b9ad-ddad0f35d6f8",
+      "name": "Map Room Choice (Code)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "70e5eb39-2c57-4111-94c2-2d498d66670b",
+              "leftValue": "={{ $node[\"Parse AI Output\"].json.step }}",
+              "rightValue": "booking_confirmed",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "454a61f1-ada5-4004-b49d-01a651790199",
+              "leftValue": "={{ $node[\"Parse AI Output\"].json.data.confirm }}",
+              "rightValue": "yes",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1904,
+        -80
+      ],
+      "id": "589c8900-b7d3-47e2-9bdd-1adb5e4aca2d",
+      "name": "IF – Confirmed?"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "filterByFormula": "={{ \"{phone} = '\" + $node[\"Normalize Message\"].json.phone + \"'\" }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2768,
+        -272
+      ],
+      "id": "c35e8117-44ed-43c5-a340-47b94eb0530e",
+      "name": "Session – Search by phone (after room options)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "355c9f3e-73e9-4633-b589-506e66d0ef19",
+              "leftValue": "={{ !!($items(\"Get Session (Airtable)\")[0]?.json?.id) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3216,
+        -272
+      ],
+      "id": "e876e877-b9b6-453a-a8a6-e7c0e69d5cf6",
+      "name": "IF – Session found?"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $json.phone }}",
+            "step": "=await_room_type",
+            "updated_at": "={{ $now }}",
+            "room_options_json": "={{ $json.room_options_json }}",
+            "phone_key_text": "={{ $node[\"Normalize Message\"].json.phone }}"
+          },
+          "matchingColumns": [
+            "phone_key_text"
+          ],
+          "schema": [
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "rooms",
+              "displayName": "rooms",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_options_json",
+              "displayName": "room_options_json",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confirmed",
+              "displayName": "confirmed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        3440,
+        -176
+      ],
+      "id": "c7f2002f-3198-4b36-9a17-e710fec7ce3f",
+      "name": "Session – Create (after room options)",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const intent = ($json.intent || \"unknown\").toString();\nconst step = ($json.step || \"\").toString();\nconst responseText = ($json.response ?? \"\").toString().trim();\n\n// Intents where Telegram nodes should own messaging (AI must stay silent)\nconst TELEGRAM_OWNED_INTENTS = new Set([\n  \"check_booking_status\",\n  \"pricing_info\",\n  \"cancel_booking\",\n]);\n\n// Steps inside book_room where Telegram nodes already send the message\n// (this is the main source of your duplicate “Which room type…” messages)\nconst TELEGRAM_OWNED_BOOK_ROOM_STEPS = new Set([\n  \"ask_room_type\",        // you show room types via Telegram\n  \"show_room_types\",      // if you use such a step name anywhere\n  \"booking_confirmed\",    // Telegram sends final confirmation card\n  \"show_pricing\",         // if pricing is ever shown via Telegram\n]);\n\nlet shouldSend = true;\n\n// 1) If response is empty, don't send anything\nif (!responseText) shouldSend = false;\n\n// 2) If intent is Telegram-owned, never send AI response\nif (TELEGRAM_OWNED_INTENTS.has(intent)) shouldSend = false;\n\n// 3) For book_room, suppress specific Telegram-owned steps\nif (intent === \"book_room\" && TELEGRAM_OWNED_BOOK_ROOM_STEPS.has(step)) {\n  shouldSend = false;\n}\n\n// Keep your original exception (safe to keep)\nif (intent === \"book_room\" && step === \"ask_room_type\") {\n  shouldSend = false;\n}\n\nreturn [{\n  json: {\n    ...$json,\n    shouldSend,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        1104
+      ],
+      "id": "fce81988-f980-451c-b8eb-b73ae2978804",
+      "name": "Compute Should Send AI"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "385f89fa-92a3-464a-b54b-0bbd8114014b",
+              "name": "message",
+              "value": "={{ $json.message }}",
+              "type": "string"
+            },
+            {
+              "id": "02ee9985-1fab-4685-bc3f-4fae86ca349e",
+              "name": "room_options_json",
+              "value": "={{ JSON.stringify($json.room_options || []) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2544,
+        -272
+      ],
+      "id": "e79163b7-23f4-4b04-8a63-63fc7de72491",
+      "name": "Carry Room Options (Set)"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $node[\"Normalize Message\"].json.phone }}",
+            "step": "await_room_type",
+            "room_options_json": "={{ JSON.stringify($node[\"Build Room Type Options (One Message)\"].json.room_options) }}",
+            "updated_at": "={{ $now.toISO() }}",
+            "phone_key_text": "={{ $node[\"Normalize Message\"].json.phone }}"
+          },
+          "matchingColumns": [
+            "phone_key_text"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "rooms",
+              "displayName": "rooms",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_options_json",
+              "displayName": "room_options_json",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confirmed",
+              "displayName": "confirmed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        3440,
+        -368
+      ],
+      "id": "b9cceba0-711c-4196-b321-cc297fe61e45",
+      "name": "Session – Update by phone (await_room_type)",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// If Airtable Search returns no items, n8n stops the workflow.\n// This node ensures we always pass exactly 1 item forward.\nconst found = $items(\"Session – Search by phone (after room options)\") || [];\n\nreturn [{\n  json: {\n    session_found: found.length > 0,\n    session_id: found[0]?.json?.id || null,\n    phone: $node[\"Normalize Message\"].json.phone,\n    // carry forward room data from your Carry Room Options node\n    message: $items(\"Carry Room Options (Set)\")[0]?.json?.message,\n    room_options_json: $items(\"Carry Room Options (Set)\")[0]?.json?.room_options_json,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2992,
+        -272
+      ],
+      "id": "db402371-d009-4247-ae31-39022ea75036",
+      "name": "Keep Alive – After Session Search (Code)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare Session Upsert Payload\n// Goal:\n// 1) Keep your stable booking flow\n// 2) Reset booking fields ONLY when user starts a new booking from welcome/menu\n// 3) DO NOT overwrite data.confirm\n// 4) Provide a safe boolean for Airtable checkbox (confirmed_checkbox)\n\nconst ai = $node[\"Parse AI Output\"].json;\n\n// Existing session (latest)\nconst sessionItems = $items(\"Get Session (Airtable)\") || [];\nconst session = sessionItems.length ? (sessionItems[0].json || {}) : {};\n\n// Normalize AI fields\nconst intent = String(ai.intent ?? \"\");\nconst step = String(ai.step ?? \"\");\nlet data = ai.data ?? {};\n\n// ✅ RESET RULE (same as the working fix)\nconst shouldReset =\n  intent === \"book_room\" &&\n  (step === \"welcome\" || step === \"menu\");\n\nif (shouldReset) {\n  // IMPORTANT: reset booking fields only\n  data = {\n    room_type: null,\n    check_in: null,\n    check_out: null,\n    rooms: null,\n    // DO NOT set confirm here\n    confirm: null,\n  };\n\n  // Force the booking flow to start fresh\n  return [{\n    json: {\n      ...ai,\n      step: \"ask_room_type\",\n      data,\n      session,\n    }\n  }];\n}\n\n// ---- Confirm checkbox calculation (safe + minimal) ----\n// We do NOT rewrite data.confirm; we only compute a boolean if we can.\nconst rawConfirm = data?.confirm;\n\n// allow true/false boolean, yes/no strings, 1/0\nconst norm = String(rawConfirm ?? \"\").trim().toLowerCase();\n\nlet confirmed_checkbox;\nif (rawConfirm === true || norm === \"true\" || norm === \"yes\" || norm === \"y\" || norm === \"1\") {\n  confirmed_checkbox = true;\n} else if (rawConfirm === false || norm === \"false\" || norm === \"no\" || norm === \"n\" || norm === \"0\") {\n  confirmed_checkbox = false;\n} else {\n  confirmed_checkbox = null; // unknown / not provided\n}\n\n// Pass through unchanged (no extra behavior changes)\n\n// 🔧 FIX: If user came from Pricing and chose Book a Room,\n// force correct room selection step\nif (intent === \"book_room\" && step === \"pricing_info\") {\n  return [{\n    json: {\n      ...ai,\n      step: \"ask_room_type\",\n      data: {\n        room_type: null,\n        check_in: null,\n        check_out: null,\n        rooms: null,\n        confirm: null\n      },\n      session\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    ...ai,\n    data,\n    confirmed_checkbox, // ✅ use this in Airtable node\n    session,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2288,
+        1104
+      ],
+      "id": "41e9f4d7-b979-4550-82c4-f0244ead06d0",
+      "name": "Prepare Session Upsert Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const phone = $node[\"Normalize Message\"].json.phone;\nconst ai = $node[\"Parse AI Output\"].json;\nconst data = ai.data || {};\n\n// rooms must be number or null\nlet rooms = null;\nif (data.rooms !== null && data.rooms !== undefined && data.rooms !== \"\") {\n  const n = Number(data.rooms);\n  rooms = Number.isFinite(n) ? n : null;\n}\n\n// confirmed must be boolean or null (write to Airtable field named: confirmed)\nconst rawConfirm = data.confirm;\nlet confirmed = null;\n\nif (rawConfirm !== null && rawConfirm !== undefined && rawConfirm !== \"\") {\n  const c = String(rawConfirm).trim().toLowerCase();\n  if (c === \"yes\" || c === \"true\" || c === \"1\") confirmed = true;\n  else if (c === \"no\" || c === \"false\" || c === \"0\") confirmed = false;\n}\n\n// room_options_json must be string or null\nlet room_options_json = null;\n\ntry {\n  const carry = $items(\"Carry Room Options (Set)\");\n  if (Array.isArray(carry) && carry.length > 0) {\n    room_options_json = carry[0]?.json?.room_options_json ?? null;\n  }\n} catch (e) {}\n\ntry {\n  const sess = $items(\"Get Session (Airtable)\");\n  if (!room_options_json && Array.isArray(sess) && sess.length > 0) {\n    room_options_json = sess[0]?.json?.room_options_json ?? null;\n  }\n} catch (e) {}\n\n// If it’s accidentally an array/object, convert to string\nif (room_options_json && typeof room_options_json !== \"string\") {\n  room_options_json = JSON.stringify(room_options_json);\n}\n\nreturn [{\n  json: {\n    phone_key_text: phone,           // Telegram chat id as string\n    phone,                           // keep same as phone_key_text\n    step: ai.step ?? null,\n    room_type: data.room_type ?? null,\n    check_in: data.check_in ?? null,\n    check_out: data.check_out ?? null,\n    rooms,                           // number|null\n    room_options_json,               // string|null\n    confirmed,                       // boolean|null  ✅ uses your existing column\n    updated_at: new Date().toISOString(),\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2528,
+        1104
+      ],
+      "id": "58ee50e6-fdba-4c65-ab72-9dc217e008ce",
+      "name": "Airtable Payload (Clean)"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "confirmed": "={{ true }}",
+            "phone_key_text": "={{$node[\"Normalize Message\"].json.phone}}",
+            "updated_at": "={{ $now }}",
+            "rooms": "={{ $node[\"Calculate Price\"].json.rooms }}",
+            "room_type": "={{ $node[\"Calculate Price\"].json.room_type }}",
+            "check_in": "={{ $node[\"Calculate Price\"].json.check_in }}",
+            "check_out": "={{ $node[\"Calculate Price\"].json.check_out }}"
+          },
+          "matchingColumns": [
+            "phone_key_text"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "rooms",
+              "displayName": "rooms",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_options_json",
+              "displayName": "room_options_json",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "confirmed",
+              "displayName": "confirmed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        1904,
+        112
+      ],
+      "id": "f8db9d4a-1931-42b0-beae-1058b51ec5fb",
+      "name": "Session – Set Confirmed TRUE",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -144,
+        480
+      ],
+      "id": "2af3e19c-1368-44cc-a503-320920803fd7",
+      "name": "Telegram Trigger",
+      "webhookId": "61111c52-a5af-47fa-88f3-41cd746b0d53",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2528,
+        592
+      ],
+      "id": "6447a538-0d27-414a-96f6-dea6d4e0e6c0",
+      "name": "Send Pricing Info",
+      "webhookId": "2098b861-bc38-4fe2-9cf5-3eb269eb6680",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "={{ $node[\"Format Booking Status Message\"].json.message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2528,
+        320
+      ],
+      "id": "2b12ea77-2993-4e47-8a14-8382f078a934",
+      "name": "Send Booking Status",
+      "webhookId": "1710b7a9-91d5-46b6-be40-a510eeec3c9a",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "={{ $node[\"Build Room Type Options (One Message)\"].json.message }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3664,
+        -272
+      ],
+      "id": "56e36334-2cc5-4697-8088-b6c27f83effb",
+      "name": "Send Room Type Options",
+      "webhookId": "a3ba4f82-19e4-4457-9add-d769c6f933e3",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $items(\"Normalize Message\")[0].json.phone }}",
+        "text": "={{\n(() => {\n  const price = $items(\"Calculate Price\")[0].json;\n  const booking = $items(\"Update Booking in Airtable\")[0].json;\n\n  return (\n    \"✅ *Booking Confirmed!*\\n\\n\" +\n\n    \"🆔 *Booking ID:* \" + booking.id + \"\\n\\n\" +\n\n    \"🏨 Room Type: \" + price.room_type + \"\\n\" +\n    \"📅 Check-in: \" + price.check_in + \"\\n\" +\n    \"📅 Check-out: \" + price.check_out + \"\\n\" +\n    \"🌙 Nights: \" + price.nights + \"\\n\" +\n    \"🛏 Rooms: \" + price.rooms + \"\\n\\n\" +\n\n    \"💵 *Price Details:*\\n\" +\n    price.price_breakdown + \"\\n\\n\" +\n\n    \"💰 *Total: \" + price.total_price + \" \" + price.currency + \"*\\n\\n\" +\n\n    \"ℹ️ Please keep this *Booking ID* to check your booking status later.\\n\\n\" +\n    \"Thank you for booking with *Grand Hotel*! 🙏\"\n  );\n})()\n}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2992,
+        112
+      ],
+      "id": "87ab447d-ebe0-42e0-829a-d73fce560a93",
+      "name": "Send Confirmation Message",
+      "webhookId": "914ba942-dc23-47ac-8bd7-7318cc6d8a5a",
+      "alwaysOutputData": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $node[\"Calculate Price\"].json;\n\nconst room_type = b.room_type;\nconst rooms_booked = Number(b.rooms || b.rooms_booked || 0);\n\nconst checkIn = new Date(b.check_in);\nconst checkOut = new Date(b.check_out);\n\n// nights are check_in ... day before check_out\nconst items = [];\nfor (let d = new Date(checkIn); d < checkOut; d.setDate(d.getDate() + 1)) {\n  const yyyy = d.getFullYear();\n  const mm = String(d.getMonth() + 1).padStart(2, \"0\");\n  const dd = String(d.getDate()).padStart(2, \"0\");\n  const dateStr = `${yyyy}-${mm}-${dd}`;\n\n  items.push({\n    json: {\n      booking_id: b.booking_id ?? null,\n      room_type,\n      date: dateStr,\n      rooms_booked,\n      date_room_type_key: `${dateStr} | ${room_type}`,\n    }\n  });\n}\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2144,
+        112
+      ],
+      "id": "3c5dcb95-06e2-4e38-a43f-9877672bdbfc",
+      "name": "Create Room Nights items",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblxj4Qn5YFQXcpvP",
+          "mode": "list",
+          "cachedResultName": "Room Nights",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblxj4Qn5YFQXcpvP"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "room_type": "={{$json.room_type}}",
+            "date": "={{$json.date}}",
+            "rooms_booked": "={{$json.rooms_booked}}",
+            "availability_link": "={{ [$json.availability_id] }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": false
+            },
+            {
+              "id": "booking_id",
+              "displayName": "booking_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "rooms_booked",
+              "displayName": "rooms_booked",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "date_room_type_key",
+              "displayName": "date_room_type_key",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "availability_link",
+              "displayName": "availability_link",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "date_room_type_key (from availability_link)",
+              "displayName": "date_room_type_key (from availability_link)",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2784,
+        112
+      ],
+      "id": "f90b3480-f618-4042-9642-3b49d1081e28",
+      "name": "Create Room Nights (Airtable)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmcqmpgkCfj3vET",
+          "mode": "list",
+          "cachedResultName": "Session",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmcqmpgkCfj3vET"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "step": "={{ $json.step }}",
+            "room_type": "={{$json.data.room_type}}",
+            "check_in": "={{$json.data.check_in}}",
+            "check_out": "={{$json.data.check_out}}",
+            "rooms": "={{$json.data.rooms}}",
+            "updated_at": "={{ $json.updated_at }}",
+            "room_options_json": "={{ $json.room_options_json }}",
+            "phone_key_text": "={{ $node[\"Normalize Message\"].json.phone }}",
+            "confirmed": "={{ $json.confirmed }}"
+          },
+          "matchingColumns": [
+            "phone_key_text"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "step",
+              "displayName": "step",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "rooms",
+              "displayName": "rooms",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "room_options_json",
+              "displayName": "room_options_json",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "confirmed",
+              "displayName": "confirmed",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2768,
+        1104
+      ],
+      "id": "d8394c63-8fa6-4175-871d-451e98292ec8",
+      "name": "Airtable Session Upsert",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbliBvdx8Ob6UhdSS",
+          "mode": "list",
+          "cachedResultName": "Availability",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tbliBvdx8Ob6UhdSS"
+        },
+        "filterByFormula": "={date_room_type_key} = \"{{ $json.date_room_type_key }}\"",
+        "returnAll": false,
+        "limit": 1,
+        "options": {},
+        "sort": {
+          "property": [
+            {
+              "field": "date"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2352,
+        112
+      ],
+      "id": "f29c9fe3-e9ff-4c9c-aba1-64208aeeb279",
+      "name": "Search Availability (Airtable)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Set Availability_link (Code) — FIXED for your current flow\n// Input: items from \"Search Availability (Airtable)\" (should include record id)\n// Also pulls matching items from \"Create Room Nights Items\" by index.\n\nconst availabilityItems = $input.all();\nconst nightItems = $items(\"Create Room Nights items\");; // must have same item count/order\n\nreturn availabilityItems.map((a, idx) => {\n  const night = nightItems[idx]?.json ?? {};\n  const availabilityId = a.json?.id ?? null; // Airtable record id from Search node\n\n  return {\n    json: {\n      ...night,          // booking_id, date, room_type, rooms_booked, date_room_type_key\n      ...a.json,         // keep fields from availability search too if you want\n      availability_id: availabilityId,\n      availability_link: availabilityId ? [availabilityId] : [], // IMPORTANT: link field must be array\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2560,
+        112
+      ],
+      "id": "c7b17163-5dd5-4ebb-9c04-07344917c777",
+      "name": "Set Availability_link (Code)",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Set booking_id from Airtable record id\nconst record = $input.first().json;\n\nreturn [{\n  json: {\n    booking_id: record.id\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2784,
+        -80
+      ],
+      "id": "487a3bc1-1d2c-4540-b21c-f93fa70f8c25",
+      "name": "Set booking_id"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblmYInv5gc9FlmOH",
+          "mode": "list",
+          "cachedResultName": "Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblmYInv5gc9FlmOH"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $node[\"Update Booking in Airtable\"].json.id }}",
+            "booking_id": "={{ $json.booking_id }}"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": false
+            },
+            {
+              "id": "booking_id",
+              "displayName": "booking_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "session_record_id",
+              "displayName": "session_record_id",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone",
+              "displayName": "phone",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "phone_key_text",
+              "displayName": "phone_key_text",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_in",
+              "displayName": "check_in",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "check_out",
+              "displayName": "check_out",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "room_type",
+              "displayName": "room_type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "nights",
+              "displayName": "nights",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "rooms_booked",
+              "displayName": "rooms_booked",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "total_price",
+              "displayName": "total_price",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "hold_expires_at",
+              "displayName": "hold_expires_at",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2992,
+        -80
+      ],
+      "id": "307e2753-bd89-428b-9976-be615c877f8a",
+      "name": "Update record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $items(\"Get Booking Status\").map(i => i.json);\n\nif (!rows.length) {\n  return [{ json: { message: \"I couldn't find a booking with that Booking ID. Please re-check and send it again.\" } }];\n}\n\n// If multiple bookings found (phone fallback), show the latest one\nconst b = rows[0];\n\nconst bookingId = b.booking_id || b.id || \"N/A\";\nconst status = b.status || \"unknown\";\n\nconst msg =\n  `🔎 *Booking Status*\\n\\n` +\n  `🆔 Booking ID: ${bookingId}\\n` +\n  `🏨 Room Type: ${b.room_type || \"-\"}\\n` +\n  `📅 Check-in: ${b.check_in || \"-\"}\\n` +\n  `📅 Check-out: ${b.check_out || \"-\"}\\n` +\n  `🛏 Rooms: ${b.rooms_booked ?? \"-\"}\\n` +\n  `💰 Total: ${b.total_price || \"-\"} ${b.currency || \"\"}\\n` +\n  `📌 Status: *${status}*`;\n\nreturn [{ json: { message: msg } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2304,
+        320
+      ],
+      "id": "83d4d4ee-3ba0-4f40-9761-5d086e096dfb",
+      "name": "Format Booking Status Message"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $items();  // Get all items returned from Airtable\nlet roomTypes = [];\n\n// Check if items is an array and ensure it’s not empty\nif (!Array.isArray(items) || items.length === 0) {\n  return [{ json: { message: \"No rooms available.\" } }];\n}\n\n// Loop through the items and get each room type and price\nitems.forEach(item => {\n  if (item.json.room_type && item.json.base_price) {\n    roomTypes.push({\n      room_type: item.json.room_type,\n      price_per_night: item.json.base_price\n    });\n  }\n});\n\n// If no rooms are found in the list, return a fallback message\nif (roomTypes.length === 0) {\n  return [{\n    json: {\n      message: \"No available rooms at the moment. Please try again later.\"\n    }\n  }];\n}\n\n// Create a formatted message for Telegram\nlet message = \"Here is our current pricing:\\n\\n\";\n\n// Loop through the available rooms and format them\nroomTypes.forEach((room, index) => {\n  message += `${index + 1}. ${room.room_type} - $${room.price_per_night} per night\\n`;\n});\n\n// ✅ Minimal guidance into booking flow (NO workflow changes needed)\nmessage +=\n  \"\\nWould you like to book a room now?\\n\" +\n  \"👉 Reply *1* to Book a Room\\n\" +\n  \"or type *book a room*\";\n\n// Return the message as output\nreturn [{\n  json: {\n    message\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        592
+      ],
+      "id": "7b808fea-8abb-4937-85ac-70325bf1fea0",
+      "name": "Format Room Types for Telegram"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "={{ $node[\"Parse AI Output\"].json.response }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3008,
+        1104
+      ],
+      "id": "094d6fcf-78e6-48e1-8111-6dcdbe739328",
+      "name": "Send AI Response",
+      "webhookId": "475ebf88-06cf-4740-86b6-0a52319a91de",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "16a5828d-1060-467f-88fa-7d4b345a9e22",
+              "leftValue": "={{ ($node[\"Parse AI Output\"].json.data.booking_id ?? \"\").trim() }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1824,
+        768
+      ],
+      "id": "bdfebd03-46bb-4d27-9c2a-222eb79e64c3",
+      "name": "IF — Booking ID Provided?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d5f64b77-c0b5-458c-9e2c-94d82b89fe78",
+              "leftValue": "={{ (($node[\"Parse AI Output\"].json.data.booking_id ?? \"\") + \"\").trim() }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1872,
+        336
+      ],
+      "id": "0b2e1dad-1c43-471b-ba45-d63a827397a9",
+      "name": "Booking_id Required",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0a08ab46-b03f-4ae2-a110-97fdabfdacd5",
+              "leftValue": "={{ !!$json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2272,
+        752
+      ],
+      "id": "b0a2ed3a-6054-4efa-b05b-25abaeee3754",
+      "name": "IF — Booking Found?"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "=⚠️ *Cancel a Booking*\n\nI can help you cancel your booking.\n\nPlease send your *Booking ID*  \n(example: recXXXXXX)\n\n⚠️ Once cancelled, this action cannot be undone.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2064,
+        912
+      ],
+      "id": "7f77db7a-dd82-4e91-9bc4-f2acde88baae",
+      "name": "Send Booking ID Required",
+      "webhookId": "af28ed0a-2eb7-4a7f-85e6-98d59f3a5bd0",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "=❌ I couldn’t find a booking with that ID.\n\nPlease double-check your Booking ID and try again.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2528,
+        928
+      ],
+      "id": "084d3b42-bee1-4647-b784-02e4fbf2749a",
+      "name": "Send Booking Not Found",
+      "webhookId": "3a97f89c-d322-4119-a23e-ffa19554f561",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblxj4Qn5YFQXcpvP",
+          "mode": "list",
+          "cachedResultName": "Room Nights",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblxj4Qn5YFQXcpvP"
+        },
+        "filterByFormula": "=({booking_id} = '{{ $node[\"Find Booking To Cancel\"].json.booking_id }}')",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        2752,
+        736
+      ],
+      "id": "69617007-7aa5-493a-81ab-17b3820c675d",
+      "name": "Find Room Nights To Revert",
+      "alwaysOutputData": true,
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const nights = $items(\"Find Room Nights To Revert\");\n\nreturn nights.map(n => {\n  const rooms = n.json.rooms_booked || 0;\n  return {\n    json: {\n      availability_id: n.json.availability_link?.[0],\n      rooms_to_release: rooms\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3008,
+        736
+      ],
+      "id": "384673aa-5a9d-4e12-9a47-d597896ef8d0",
+      "name": "Compute Availability Rollback"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "=✅ *Booking Cancelled Successfully*\n\nBooking ID: {{ $node[\"Find Booking To Cancel\"].json.booking_id }}\n\nIf you’d like to book again, reply *1* or type *book a room*.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3456,
+        736
+      ],
+      "id": "877d6f28-3478-4e98-8296-ef4caca699dc",
+      "name": "Send Cancel Confirmation",
+      "webhookId": "2cc7a67f-b523-4369-be7c-7ec25fce68cd",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $node[\"Normalize Message\"].json.phone }}",
+        "text": "=Please send your Booking ID (example: recXXXX…).",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2096,
+        480
+      ],
+      "id": "9a9501d9-c1c4-4805-9d1b-34ad73931412",
+      "name": "Provide Booking ID",
+      "webhookId": "5e410d32-fb90-4a4f-befc-a599a08f6a71",
+      "credentials": {
+        "telegramApi": {
+          "id": "JG1aNTdv36NvAyPX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "deleteRecord",
+        "base": {
+          "__rl": true,
+          "value": "appqH2eiu2fGUSvHL",
+          "mode": "list",
+          "cachedResultName": "Hotel Room Bookings",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblxj4Qn5YFQXcpvP",
+          "mode": "list",
+          "cachedResultName": "Room Nights",
+          "cachedResultUrl": "https://airtable.com/appqH2eiu2fGUSvHL/tblxj4Qn5YFQXcpvP"
+        },
+        "id": "={{ $json.availability_id }}"
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        3232,
+        736
+      ],
+      "id": "b1d63938-9fbd-4a63-8007-0b4a2044e3c3",
+      "name": "Delete Room Nights",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "YsasuB0FAaSHOC9K",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## PATH OF BOOKING CANCELLATION \n**It asks for booking id and upon confirmation leads towards deleting Room Nights Airtable entries and releasing booked rooms** ",
+        "width": 320,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2768,
+        912
+      ],
+      "typeVersion": 1,
+      "id": "d337a7ad-5a83-4307-889a-fd3fbb50a614",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## PATH OF PRICING INFO \n**This path leads towards room booking after giving pricing info**",
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2736,
+        560
+      ],
+      "typeVersion": 1,
+      "id": "ffe52ab7-0a6a-4290-b88c-5563739bb86d",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## PATH OF BOOKING STATUS BRANCH\n**It checks the booking id before informing about the status of the booking** ",
+        "height": 192,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        2736,
+        304
+      ],
+      "typeVersion": 1,
+      "id": "bcea476b-a5bb-4213-9e96-69fc71bafa51",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "## PART 1 OF BOOK_ROOM BRANCH: Selection of Room Types \n**It is based on Airtable Inventory**",
+        "height": 224,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1584,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "39237039-4d27-4399-8a21-c7657f56f0fc",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "## PART 2 OF BOOK_ROOM BRANCH: Price Calculation + Booking Confirmation\n**This path is based on Airtable Inventory,and it updates Airtable Session, Room Nights & Availabilty** ",
+        "height": 272,
+        "width": 272,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3184,
+        0
+      ],
+      "typeVersion": 1,
+      "id": "dbd3a2aa-fef0-4400-9fe8-eae7cfa527ff",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "## PATH OF AI AGENT MESSAGING\n**It involves sending menu, asking check-in and check-out dates, room types and number of rooms and misc queries** ",
+        "width": 272,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        3216,
+        1104
+      ],
+      "typeVersion": 1,
+      "id": "db071c3a-65d4-45fb-ad83-96bbaffce4f6",
+      "name": "Sticky Note6"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalize Message": {
+      "main": [
+        [
+          {
+            "node": "Get Session (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent (Process Queries)": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent (Process Queries)",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Check Step = ask_room_type",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF – Confirmed?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Booking_id Required",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Pricing From Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF — Booking ID Provided?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Price": {
+      "main": [
+        [
+          {
+            "node": "Update Booking in Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Booking in Airtable": {
+      "main": [
+        [
+          {
+            "node": "Set booking_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Booking Status": {
+      "main": [
+        [
+          {
+            "node": "Format Booking Status Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Pricing From Inventory": {
+      "main": [
+        [
+          {
+            "node": "Format Room Types for Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Booking To Cancel": {
+      "main": [
+        [
+          {
+            "node": "IF — Booking Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel Booking Record": {
+      "main": [
+        [
+          {
+            "node": "Find Room Nights To Revert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Compute Should Send AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Price From Inventory": {
+      "main": [
+        [
+          {
+            "node": "Calculate Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Step = ask_room_type": {
+      "main": [
+        [
+          {
+            "node": "Get Available Room Types",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Available Room Types": {
+      "main": [
+        [
+          {
+            "node": "Build Room Type Options (One Message)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "AI Agent (Process Queries)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent (Process Queries)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Room Type Options (One Message)": {
+      "main": [
+        [
+          {
+            "node": "Carry Room Options (Set)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF – Should Send AI Response": {
+      "main": [
+        [
+          {
+            "node": "Prepare Session Upsert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Session (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Map Room Choice (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Room Choice (Code)": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF – Confirmed?": {
+      "main": [
+        [
+          {
+            "node": "Get Price From Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session – Search by phone (after room options)": {
+      "main": [
+        [
+          {
+            "node": "Keep Alive – After Session Search (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF – Session found?": {
+      "main": [
+        [
+          {
+            "node": "Session – Update by phone (await_room_type)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Session – Create (after room options)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session – Create (after room options)": {
+      "main": [
+        [
+          {
+            "node": "Send Room Type Options",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Should Send AI": {
+      "main": [
+        [
+          {
+            "node": "IF – Should Send AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Carry Room Options (Set)": {
+      "main": [
+        [
+          {
+            "node": "Session – Search by phone (after room options)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session – Update by phone (await_room_type)": {
+      "main": [
+        [
+          {
+            "node": "Send Room Type Options",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep Alive – After Session Search (Code)": {
+      "main": [
+        [
+          {
+            "node": "IF – Session found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Session Upsert Payload": {
+      "main": [
+        [
+          {
+            "node": "Airtable Payload (Clean)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable Payload (Clean)": {
+      "main": [
+        [
+          {
+            "node": "Airtable Session Upsert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session – Set Confirmed TRUE": {
+      "main": [
+        [
+          {
+            "node": "Create Room Nights items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Pricing Info": {
+      "main": [
+        []
+      ]
+    },
+    "Send Booking Status": {
+      "main": [
+        []
+      ]
+    },
+    "Send Confirmation Message": {
+      "main": [
+        []
+      ]
+    },
+    "Create Room Nights items": {
+      "main": [
+        [
+          {
+            "node": "Search Availability (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Room Nights (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable Session Upsert": {
+      "main": [
+        [
+          {
+            "node": "Send AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Availability (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Set Availability_link (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Availability_link (Code)": {
+      "main": [
+        [
+          {
+            "node": "Create Room Nights (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set booking_id": {
+      "main": [
+        [
+          {
+            "node": "Update record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update record": {
+      "main": [
+        [
+          {
+            "node": "Session – Set Confirmed TRUE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Booking Status Message": {
+      "main": [
+        [
+          {
+            "node": "Send Booking Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Room Types for Telegram": {
+      "main": [
+        [
+          {
+            "node": "Send Pricing Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send AI Response": {
+      "main": [
+        []
+      ]
+    },
+    "IF — Booking ID Provided?": {
+      "main": [
+        [
+          {
+            "node": "Find Booking To Cancel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Booking ID Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Booking_id Required": {
+      "main": [
+        [
+          {
+            "node": "Get Booking Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Provide Booking ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — Booking Found?": {
+      "main": [
+        [
+          {
+            "node": "Cancel Booking Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Booking Not Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Room Nights To Revert": {
+      "main": [
+        [
+          {
+            "node": "Compute Availability Rollback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Availability Rollback": {
+      "main": [
+        [
+          {
+            "node": "Delete Room Nights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Room Nights": {
+      "main": [
+        [
+          {
+            "node": "Send Cancel Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "c53abdd5-8e7e-4af1-a8a7-4fa8a0ff7d70",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "75c1a99ca732a06f925dbe2e1db0243bb49bca2f1ef1aec5a2d8e7f2e488d623"
+  },
+  "id": "HvnoDu1BK7rD93Bm",
+  "tags": []
+}
